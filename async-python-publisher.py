@@ -62,7 +62,7 @@ class PublisherClient:
                 await self.websocket.send(json.dumps(message))
                 logger.info(f"Published to topic {self.topic}: {message}")
                 
-                await asyncio.sleep(2)
+                await asyncio.sleep(100)
                 
         except websockets.exceptions.ConnectionClosed:
             logger.error(f"WebSocket connection closed for publisher {self.client_id}")
