@@ -71,9 +71,11 @@ class DeepgramTTSClient:
             print(f"\n\n{warning}\n\n")
 
         async def on_error(self, error, **kwargs):
+            print("error ....")
             print(f"\n\n{error}\n\n")
 
         async def on_unhandled(self, unhandled, **kwargs):
+            print("unhandled ....")
             print(f"\n\n{unhandled}\n\n")
 
         async def on_binary_data(self, data, **kwargs):
@@ -102,13 +104,14 @@ class DeepgramTTSClient:
         self.dg_connection.on(SpeakWebSocketEvents.Unhandled, on_unhandled)
 
 
-    def get_speak_options(self, model: str = "aura-asteria-en",
+    def get_speak_options(self, model: str = "aura-hera-en",
             encoding: str = "linear16",
-            sample_rate: int = 16000,):
+            sample_rate: int = 16000):
+
         options: SpeakWSOptions = SpeakWSOptions(
             model=model,
             encoding=encoding,
-            sample_rate=sample_rate,
+            sample_rate=sample_rate
         )
         return options
 
@@ -134,9 +137,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Set up the callback to send audio to the WebSocket
     async def send_audio_to_websocket(self, data, **kwargs):
-        print("helloo su................")
-        print(kwargs)
-        print(data)
         await websocket.send_bytes(data)
 
     tts_client.bind_audio_event(send_audio_to_websocket)
@@ -146,14 +146,16 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             # Receive text from the client
-            text = await websocket.receive_text()
 
+            text = "Knowing how to write a paragraph is incredibly important. It’s a basic aspect of writing, and it is something that everyone should know how to do. There is a specific structure that you have to follow when you’re writing a paragraph. This structure helps make it easier for the reader to understand what is going on. Through writing good paragraphs, a person can communicate a lot better through their writing."
             print("sending text")
             # Send to Deepgram for TTS conversion
             await tts_client.dg_connection.send_text(text)
 
             # Flush to make sure all text is processed
             await tts_client.dg_connection.flush()
+
+            text = await websocket.receive_text()
 
     except Exception as e:
         print(f"WebSocket error: {e}")

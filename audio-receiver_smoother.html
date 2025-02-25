@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Streaming Receiver - Linear16 at 16000Hz</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .visualizer {
+            width: 100%;
+            height: 200px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+        }
+        .status {
+            padding: 10px;
+            background-color: #f8f8f8;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Audio Streaming Receiver</h1>
+        <p>Configure to receive Linear16 PCM audio at 16000Hz sample rate (Playing at 0.75x speed)</p>
+        
+        <div class="controls">
+            <button id="startButton">Start Receiving</button>
+            <button id="stopButton" disabled>Stop</button>
+            <span id="connectionStatus">Disconnected</span>
+        </div>
+        
+        <canvas id="visualizer" class="visualizer"></canvas>
+        
+        <div class="status" id="statusLog">Ready to connect...</div>
+    </div>
+
+    <script>
+        // Audio context and nodes
+        let audioContext;
+        let audioSource;
+        let analyser;
+        
+        // Playback rate configuration
+        const playbackRate = 0.75; // 0.75x speed (slower)
+        
+        // Audio processing settings
+        let bufferingThreshold = 3; // Initial buffering chunks before playback starts
+        
+        // WebSocket connection
+        let socket;
+        
+        // Buffer for incoming audio data
+        let audioBuffer = [];
+        
+        // Canvas for visualization
+        const canvas = document.getElementById('visualizer');
+        const canvasCtx = canvas.getContext('2d');
+        
+        // UI elements
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const statusLog = document.getElementById('statusLog');
+        
+        // Set up canvas size
+        function setupCanvas() {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+        }
+        
+        // Initialize audio context
+        function initAudio() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000 // Set sample rate to 16000Hz
+                });
+                
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                
+                // Connect analyser to destination
+                analyser.connect(audioContext.destination);
+                
+                log('Audio context initialized at 16000Hz');
+                return true;
+            } catch (error) {
+                log('Error initializing audio context: ' + error.message);
+                return false;
+            }
+        }
+        
+        // Audio buffer management for smoother playback
+        let audioBufferQueue = [];
+        let bufferingSize = 5; // Number of chunks to buffer before starting playback
+        let isPlaying = false;
+        let lastPlayTime = 0;
+        let audioBufferSize = 8192; // Larger buffer size for smoother processing
+        
+        // Process incoming linear16 audio data
+        function processAudioData(data) {
+            if (!audioContext) return;
+            
+            // Convert incoming data to Float32Array
+            // Assuming data is Int16Array (linear16 format)
+            const int16Data = new Int16Array(data);
+            const floatData = new Float32Array(int16Data.length);
+            
+            // Apply slight smoothing and normalization to reduce crackling
+            for (let i = 0; i < int16Data.length; i++) {
+                // Convert from Int16 to Float32 with a small amount of softening
+                floatData[i] = (int16Data[i] / 32768.0) * 0.95; // 0.95 to slightly reduce amplitude and minimize clipping
+                
+                // Apply very gentle smoothing for high frequencies (potential crackling sources)
+                if (i > 0 && i < int16Data.length - 1) {
+                    // Simple 3-point moving average with higher weight for the current sample
+                    floatData[i] = (floatData[i-1] * 0.15) + (floatData[i] * 0.7) + (floatData[i+1] * 0.15);
+                }
+            }
+            
+            // Queue the audio data with proper timing information
+            audioBufferQueue.push({
+                data: floatData,
+                duration: (floatData.length / 16000) / playbackRate // Extended duration for slower playback
+            });
+            
+            // Start playing after we've buffered enough data to ensure smooth playback
+            if (!isPlaying && audioBufferQueue.length >= bufferingSize) {
+                log("Starting playback with initial buffer of " + audioBufferQueue.length + " chunks");
+                isPlaying = true;
+                playNextBuffer();
+            }
+            
+            // Update visualization
+            drawVisualizer();
+        }
+        
+        // Play next buffer with crossfading for smoother transitions
+        function playNextBuffer() {
+            if (audioBufferQueue.length === 0) {
+                // If buffer is empty, wait a moment and try again rather than stopping
+                setTimeout(() => {
+                    if (audioBufferQueue.length > 0) {
+                        playNextBuffer();
+                    } else if (isPlaying) {
+                        log("Buffer underrun - waiting for more data");
+                        // Only declare not playing if we've waited a significant time
+                        setTimeout(() => {
+                            if (audioBufferQueue.length === 0) {
+                                isPlaying = false;
+                                log("Playback stopped - no more data");
+                            }
+                        }, 2000);
+                    }
+                }, 100);
+                return;
+            }
+            
+            // Combine multiple small chunks into a larger buffer if available
+            let combinedAudioData = {
+                data: new Float32Array(0),
+                duration: 0
+            };
+            
+            // Determine how many chunks to combine (up to our target buffer size)
+            let totalSamples = 0;
+            let chunksToUse = 0;
+            
+            while (audioBufferQueue.length > chunksToUse && 
+                  totalSamples < audioBufferSize && 
+                  chunksToUse < Math.min(3, audioBufferQueue.length)) {
+                totalSamples += audioBufferQueue[chunksToUse].data.length;
+                chunksToUse++;
+            }
+            
+            // If we have multiple chunks, combine them
+            if (chunksToUse > 1) {
+                let newData = new Float32Array(totalSamples);
+                let newOffset = 0;
+                let totalDuration = 0;
+                
+                for (let i = 0; i < chunksToUse; i++) {
+                    const chunk = audioBufferQueue.shift();
+                    newData.set(chunk.data, newOffset);
+                    newOffset += chunk.data.length;
+                    totalDuration += chunk.duration;
+                }
+                
+                combinedAudioData.data = newData;
+                combinedAudioData.duration = totalDuration;
+            } else {
+                // Just use the single chunk
+                combinedAudioData = audioBufferQueue.shift();
+            }
+            
+            // Create audio buffer with the combined data
+            const buffer = audioContext.createBuffer(1, combinedAudioData.data.length, 16000);
+            buffer.getChannelData(0).set(combinedAudioData.data);
+            
+            // Create and configure the source
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            
+            // Add a gentle lowpass filter to smooth out high frequencies
+            const lowpass = audioContext.createBiquadFilter();
+            lowpass.type = "lowpass";
+            lowpass.frequency.value = 7000; // Adjust to filter very high frequencies that might cause crackling
+            lowpass.Q.value = 0.7; // Gentle filter slope
+            
+            // Add a compressor to prevent sudden volume changes
+            const compressor = audioContext.createDynamicsCompressor();
+            compressor.threshold.value = -24;
+            compressor.knee.value = 30;
+            compressor.ratio.value = 12;
+            compressor.attack.value = 0.003;
+            compressor.release.value = 0.25;
+            
+            // Connect the audio processing chain
+            source.connect(lowpass);
+            lowpass.connect(compressor);
+            compressor.connect(analyser);
+            
+            // Calculate when to start this buffer with a small overlap for smoothness
+            const now = audioContext.currentTime;
+            const overlap = 0.005; // 5ms overlap for crossfading
+            const startTime = Math.max(lastPlayTime - overlap, now);
+            
+            // If we're starting late (buffer underrun), log it
+            if (now > lastPlayTime + 0.1) {
+                log("Buffer underrun detected: " + ((now - lastPlayTime) * 1000).toFixed(1) + "ms");
+            }
+            
+            source.start(startTime);
+            
+            // Update the last play time for the next buffer
+            lastPlayTime = startTime + combinedAudioData.duration;
+            
+            // Schedule the next buffer to play with adaptive timing
+            // Schedule earlier when buffer is running low
+            const lookAheadTime = Math.min(combinedAudioData.duration * 0.7, 0.2);
+            setTimeout(() => {
+                playNextBuffer();
+            }, (combinedAudioData.duration - lookAheadTime) * 1000);
+        }
+        
+        // Connect to WebSocket
+        function connectWebSocket(url) {
+            try {
+                socket = new WebSocket(url);
+                
+                socket.binaryType = "arraybuffer";
+                
+                socket.onopen = function() {
+                    connectionStatus.textContent = 'Connected';
+                    log('WebSocket connection established');
+                    
+                    // Reset audio timing variables when starting a new connection
+                    audioBufferQueue = [];
+                    isPlaying = false;
+                    lastPlayTime = audioContext.currentTime;
+                    
+                    // Start with higher buffering for initial playback stability
+                    log("Buffering audio for smooth playback...");
+                    bufferingThreshold = bufferingSize;
+                    
+                    startButton.disabled = true;
+                    stopButton.disabled = false;
+                };
+                
+                socket.onmessage = function(event) {
+                    // Process binary audio data
+                    processAudioData(event.data);
+                };
+                
+                socket.onclose = function() {
+                    connectionStatus.textContent = 'Disconnected';
+                    log('WebSocket connection closed');
+                    
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                };
+                
+                socket.onerror = function(error) {
+                    log('WebSocket error: ' + error.message);
+                    connectionStatus.textContent = 'Error';
+                };
+                
+            } catch (error) {
+                log('Error connecting to WebSocket: ' + error.message);
+            }
+        }
+        
+        // Draw audio visualization
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+            
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            analyser.getByteTimeDomainData(dataArray);
+            
+            canvasCtx.fillStyle = 'rgb(240, 240, 240)';
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            canvasCtx.lineWidth = 2;
+            canvasCtx.strokeStyle = 'rgb(0, 123, 255)';
+            canvasCtx.beginPath();
+            
+            const sliceWidth = canvas.width * 1.0 / bufferLength;
+            let x = 0;
+            
+            for (let i = 0; i < bufferLength; i++) {
+                const v = dataArray[i] / 128.0;
+                const y = v * canvas.height / 2;
+                
+                if (i === 0) {
+                    canvasCtx.moveTo(x, y);
+                } else {
+                    canvasCtx.lineTo(x, y);
+                }
+                
+                x += sliceWidth;
+            }
+            
+            canvasCtx.lineTo(canvas.width, canvas.height / 2);
+            canvasCtx.stroke();
+        }
+        
+        // Log messages to the status area
+        function log(message) {
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString();
+            statusLog.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+        
+        // Event listeners
+        startButton.addEventListener('click', function() {
+            if (!audioContext && !initAudio()) {
+                return;
+            }
+            
+            // You would typically get this URL from your configuration
+            // Replace with your actual WebSocket server URL
+            const wsUrl = 'ws://127.0.0.1:8181/tts';
+            
+            log('Connecting to streaming server...');
+            connectWebSocket(wsUrl);
+        });
+        
+        stopButton.addEventListener('click', function() {
+            if (socket) {
+                socket.close();
+                log('Disconnected from streaming server');
+            }
+            
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            connectionStatus.textContent = 'Disconnected';
+        });
+        
+        // Initialize
+        window.addEventListener('load', function() {
+            setupCanvas();
+            log('Ready to receive audio stream (Linear16 PCM, 16000Hz)');
+        });
+        
+        // Handle window resize for canvas
+        window.addEventListener('resize', setupCanvas);
+    </script>
+</body>
+</html>
