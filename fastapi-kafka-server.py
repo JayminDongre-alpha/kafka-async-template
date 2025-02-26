@@ -130,7 +130,7 @@ class ConnectionManager:
             del self.consumers[websocket]
             logger.info(f"Consumer disconnected. Total consumers: {len(self.consumers)}")
 
-manager = ConnectionManager()
+
 
 @app.websocket("/ws/publish/{client_id}")
 async def websocket_publisher_endpoint(
@@ -138,6 +138,7 @@ async def websocket_publisher_endpoint(
     client_id: str,
     topic: str = Query(default="default-topic")
 ):
+    manager = ConnectionManager()
     try:
         await manager.connect_publisher(websocket, client_id, topic)
         kafka_manager = manager.publishers[websocket]
@@ -165,6 +166,7 @@ async def websocket_subscriber_endpoint(
     client_id: str,
     topic: str = Query(default="default-topic")
 ):
+    manager = ConnectionManager()
     try:
         await manager.connect_subscriber(websocket, client_id, topic)
         
